@@ -17,11 +17,38 @@ def get_com_pd_code_list() -> list:
         arr.append((knotname, pd_code))
     return arr
 
-def get_colored_jones(pd_code: list, n: int):
+# 获得扭结名称和 pd_code 的对应关系
+@functools.cache
+def get_com_pd_code_dict() -> dict:
+    file = os.path.join(dirnow, "com_pd_code_list.txt")
+    dic = {}
+    for line in open(file):
+        line = line.strip()[1:-1]
+        knotname, pd_code = line.split("|")
+        dic[knotname] = eval(pd_code)
+    return dic
+
+@functools.cache
+def get_colored_jones_for_pd_code(pd_code: str, n: int):
+    pd_code = eval(pd_code)
     if pd_code == []:
         return 1
-    print(pd_code)
     return Knot(pd_code).colored_jones_polynomial(n)
+
+# 试图使用乘法计算出不太好直接使用 pd_code 计算的成分
+@functools.cache
+def get_colored_jones_for_knotname(knot: str, n_val: int):
+    if knot.find(",") == -1:
+        pd_code = get_com_pd_code_dict()[knot]
+        return get_colored_jones_for_pd_code(str(pd_code), n_val)
+    else:
+        arr = []
+        for sub_knot in knot.split(","):
+            sub_pd_code = get_com_pd_code_dict()[sub_knot]
+            arr.append(get_colored_jones_for_pd_code(str(sub_pd_code), n_val))
+        for i in range(1, len(arr)):
+            arr[0] *= arr[i]
+        return arr[0]
 
 def get_colored_jones_for_index(n_val: int, k_idx: int): # 创建文件并写入，解决一个具体问题
     filename = "n%d_k%04d.txt" % (n_val, k_idx)
@@ -31,16 +58,14 @@ def get_colored_jones_for_index(n_val: int, k_idx: int): # 创建文件并写入
             os.remove(filepath)
     if not os.path.isfile(filepath): # 如果文件已经存在就跳过
         knot, pd_code = get_com_pd_code_list()[k_idx]
-        line_content  = "[%s|%s]\n" % (str(get_colored_jones(pd_code, n_val)), knot)
+        # line_content  = "[%s|%s]\n" % (str(get_colored_jones_for_pd_code(pd_code, n_val)), knot)
+        line_content  = "[%s|%s]\n" % (str(get_colored_jones_for_knotname(knot, n_val)), knot)
         open(filepath, "w").write(line_content)
 
-def question_function(question_index, common_context): # 用于计算染色琼斯
-    knot_index = question_index // 2
-    n_index    = question_index %  2
-    n_val      = n_index + 2
-    get_colored_jones_for_index(n_val, knot_index)
-
 if __name__ == "__main__":
-    question_count = len(get_com_pd_code_list()) * 2
-    process_count  = 36
-    mptrolley.solve_problem_with_multiprocessing(question_function, {}, question_count, process_count)
+    import sys
+    assert len(sys.argv) == 3
+    filename, n_val, k_val = sys.argv
+    n_val = int(n_val)
+    k_val = int(k_val)
+    get_colored_jones_for_index(n_val, k_val)
