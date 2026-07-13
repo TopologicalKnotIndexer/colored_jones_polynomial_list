@@ -37,7 +37,7 @@ class ProcessWrapQueue:
         self.pend_queue   = [] # 还未进入执行的任务队列
         self.run_queue    = [] # 正在执行的任务队列，我们要求正在执行的任务不超过一个
         self.queue_status = "STOP"
-        self.monitor      = threading.Thread(target=monitor_function)
+        self.monitor      = threading.Thread(target=monitor_function, daemon=True)
         self.lock         = threading.Lock()
         self.monitor.start()
 

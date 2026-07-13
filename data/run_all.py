@@ -1,43 +1,74 @@
-from ProcessWrapQueue import ProcessWrapQueue
-from ProcessWrap import ProcessWrap
+"""Run all colored-Jones checkpoints with bounded parallel subprocesses."""
 
-import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import json
+import subprocess
+import sys
 import time
-import shlex
 
-TIME_LIMIT_SEC = 60 # 超时时长
-dirnow = os.path.dirname(os.path.abspath(__file__))
 
-def main(process_cnt: int): # 多个任务队列
-    pw_queue_list = []
-    for _ in range(process_cnt): # 创建任务队列组
-        pw_queue = ProcessWrapQueue()
-        pw_queue_list.append(pw_queue)
+TIME_LIMIT_SEC = 60
+HERE = Path(__file__).resolve().parent
+WORKER = HERE / "get_colored_jones_2_and_3.py"
+LOG_DIR = HERE / "log"
+KNOT_COUNT = 1783
 
-    for pw_queue in pw_queue_list: # 启动所有队列
-        pw_queue.set_queue_status("RUN")
 
-    for idx in range(1783 * 2): # 分配所有任务
-        n_val     = 2 + (idx % 2)
-        k_val     = idx // 2
-        queue_idx = idx % process_cnt # 队列编号
-        pw        = ProcessWrap(shlex.split("bash -c 'python3 get_colored_jones_2_and_3.py %d %d'" % (n_val, k_val)), os.getcwd())
-        pw_queue_list[queue_idx].add_process_wrap(pw)
+def _run_task(color: int, knot_index: int, timeout: float = TIME_LIMIT_SEC) -> dict:
+    started = time.monotonic()
+    command = [sys.executable, str(WORKER), str(color), str(knot_index)]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=HERE,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+        return {
+            "color": color,
+            "knot_index": knot_index,
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "elapsed_seconds": time.monotonic() - started,
+            "timed_out": False,
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "color": color,
+            "knot_index": knot_index,
+            "returncode": None,
+            "stdout": exc.stdout or "",
+            "stderr": exc.stderr or "",
+            "elapsed_seconds": time.monotonic() - started,
+            "timed_out": True,
+        }
 
-    def kill_run_too_long():    # 杀死所有运行时间太长的任务
-        for pw_queue in pw_queue_list:
-            with pw_queue.lock: # 加锁
-                for pw in pw_queue.run_queue:
-                    if pw.get_status_time_now() >= TIME_LIMIT_SEC and pw.get_status()["status"] == "RUN":
-                        pw.kill_task()
 
-    while True:
-        os.system("clear")
-        for idx, pw_queue in enumerate(pw_queue_list): # 显示日志信息
-            print("ProcessWrapQueue_%02d: " % idx, pw_queue.get_queue_status_brief())
-            pw_queue.dump_queue_status_to_file(os.path.join(dirnow, "log", "ProcessWrapQueue_%02d.log" % idx))
-        kill_run_too_long() # 杀死运行时间太长的进程
-        time.sleep(10)
+def main(process_count: int = 10) -> int:
+    if process_count < 1:
+        raise ValueError("process_count must be positive")
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    tasks = [(color, index) for index in range(KNOT_COUNT) for color in (2, 3)]
+    failures = 0
+    with ThreadPoolExecutor(max_workers=process_count) as executor:
+        futures = {executor.submit(_run_task, *task): task for task in tasks}
+        for completed, future in enumerate(as_completed(futures), start=1):
+            record = future.result()
+            if record["returncode"] != 0:
+                failures += 1
+            log_path = LOG_DIR / f"n{record['color']}_k{record['knot_index']:04d}.json"
+            log_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+            if completed % 100 == 0 or completed == len(tasks):
+                print(f"completed {completed}/{len(tasks)}; failures={failures}", flush=True)
+    return 1 if failures else 0
+
 
 if __name__ == "__main__":
-    main(10)
+    workers = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+    raise SystemExit(main(workers))

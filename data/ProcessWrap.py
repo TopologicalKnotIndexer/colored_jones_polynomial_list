@@ -1,117 +1,119 @@
-import time
-import os
+"""Compatibility process wrapper with non-blocking pipe collection."""
+
+from pathlib import Path
 import shlex
-import threading
 import subprocess
-import random
-import string
+import threading
+import time
+import uuid
 
-def generate_random_string(length): # 生成随机序列号，用于全局标定一个任务
-    characters = string.ascii_letters + string.digits
-    random_string = ''.join(random.choice(characters) for _ in range(length))
-    return random_string
 
-# 进程状态
-#   INIT: 已经初始化，但是还没开始运行
-#   RUN : 正在运行
-#   TERM: 运行已经结束（可能是出错或者正常结束）
+def generate_random_string(length: int) -> str:
+    value = ""
+    while len(value) < length:
+        value += uuid.uuid4().hex
+    return value[:length]
 
-global_process_wrap_dict = {}
+
+global_process_wrap_dict: dict[str, "ProcessWrap"] = {}
+
 
 class ProcessWrap:
+    """Track one subprocess through `INIT`, `RUN`, and `TERM` states."""
 
-    # 指定命令和当前工作目录
-    def __init__(self, cmd: list, cwd: str):
-        def monitor_function(): # 轮询监视器函数
-            while True:
-                time.sleep(0.1)
-                if self.get_status()["status"] == "TERM": # 监视器退出
-                    return
-        self.obj_uuid   = "ProcessWrap_" + generate_random_string(128) # 把自己注册到全局管理器对象
-        global global_process_wrap_dict
+    def __init__(self, cmd: list[str], cwd: str):
+        if not cmd or not all(isinstance(item, str) for item in cmd):
+            raise TypeError("cmd must be a non-empty list of strings")
+        if not Path(cwd).is_dir():
+            raise NotADirectoryError(cwd)
+        self.obj_uuid = "ProcessWrap_" + generate_random_string(128)
         global_process_wrap_dict[self.obj_uuid] = self
+        self.cmd = list(cmd)
+        self.cwd = cwd
+        self.begin_time = time.monotonic()
+        self.pobj: subprocess.Popen | None = None
+        self.stdout: bytes | None = None
+        self.stderr: bytes | None = None
+        self.run_time: float | None = None
+        self.aux_info = ""
+        self.lock = threading.RLock()
+        self._completed = threading.Event()
 
-        self.cmd        = cmd
-        self.cwd        = cwd
-        self.begin_time = time.time() # 什么时刻进入当前状态
-        self.pobj       = None
-        self.monitor    = threading.Thread(target=monitor_function)
-        self.info       = None
-        self.stdout     = None
-        self.stderr     = None
-        self.run_time   = None # 记录进程运行的总时长
-        self.aux_info   = ""
-        self.lock       = threading.Lock()
-
-    # 获取当前状态所处的时间
-    def get_status_time_now(self):
-        return time.time() - self.begin_time
-    
-    # 获取当前进程状态
-    def get_status(self):
+    def _collect(self) -> None:
+        assert self.pobj is not None
+        stdout, stderr = self.pobj.communicate()
         with self.lock:
-            common_dic = {
-                "obj_uuid"   : self.obj_uuid,
-                "begin_time" : self.begin_time,
-                "cmd"        : self.cmd,
-                "cwd"        : self.cwd,
-                "info"       : None
-            }
-            if self.pobj is None: # 当前进程尚未初始化
-                update_dic = {
-                    "status": "INIT",
-                }
-            elif self.pobj.poll() is None: # 程序正在运行
-                update_dic = {
-                    "status": "RUN",
-                }
-            else:
-                if self.stdout is None: # 初始化时获取
-                    self.returncode = self.pobj.wait()
-                    try:
-                        self.stdout, self.stderr = self.pobj.communicate()
-                    except:
-                        self.stdout = b""
-                        self.stderr = b""
-                    self.run_time   = time.time() - self.begin_time # 总运行时间
-                    self.begin_time = time.time()
-                update_dic = { # 程序已经运行结束
-                    "status": "TERM",
-                    "info": {
-                        "returncode": self.pobj.returncode,
-                        "stdout"    : self.stdout.decode(),
-                        "stderr"    : self.stderr.decode(),
-                        "run_time"  : self.run_time # 总运行时间
-                    }
-                }
-            common_dic.update(update_dic)
-        return common_dic
-    
-    # 启动任务
-    def run_task(self):
-        if self.pobj is not None: # 不要重复启动已经启动过的任务
-            return
-        self.begin_time = time.time()
-        self.pobj       = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.monitor.start() # 启动监视器线程
+            self.stdout = stdout
+            self.stderr = stderr
+            self.run_time = time.monotonic() - self.begin_time
+            self._completed.set()
 
-    # 杀死任务
-    def kill_task(self):
-        if self.pobj is None: # 还没运行，谈何杀死
-            return
-        if self.pobj.poll() is not None: # 已经结束了，不用再杀死了
-            return
-        self.pobj.terminate()
-        self.aux_info = "KILLED" # 是由用户自己杀死的
-        self.pobj.wait()         # 等待进程自然结束
-        self.get_status()        # 更新状态信息
+    def get_status_time_now(self) -> float:
+        with self.lock:
+            return self.run_time if self.run_time is not None else time.monotonic() - self.begin_time
+
+    def get_status(self) -> dict:
+        with self.lock:
+            common = {
+                "obj_uuid": self.obj_uuid,
+                "begin_time": self.begin_time,
+                "cmd": self.cmd,
+                "cwd": self.cwd,
+                "info": None,
+            }
+            if self.pobj is None:
+                common["status"] = "INIT"
+            elif not self._completed.is_set():
+                common["status"] = "RUN"
+            else:
+                common.update(
+                    {
+                        "status": "TERM",
+                        "info": {
+                            "returncode": self.pobj.returncode,
+                            "stdout": (self.stdout or b"").decode("utf-8", errors="replace"),
+                            "stderr": (self.stderr or b"").decode("utf-8", errors="replace"),
+                            "run_time": self.run_time,
+                        },
+                    }
+                )
+            return common
+
+    def run_task(self) -> None:
+        with self.lock:
+            if self.pobj is not None:
+                return
+            self.begin_time = time.monotonic()
+            self.pobj = subprocess.Popen(
+                self.cmd,
+                cwd=self.cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            threading.Thread(target=self._collect, daemon=True).start()
+
+    def wait(self, timeout: float | None = None) -> dict:
+        if self.pobj is None:
+            raise RuntimeError("task has not been started")
+        if not self._completed.wait(timeout):
+            raise TimeoutError("process did not finish before timeout")
+        return self.get_status()
+
+    def kill_task(self, timeout: float = 5) -> None:
+        with self.lock:
+            process = self.pobj
+            if process is None or self._completed.is_set():
+                return
+            process.terminate()
+            self.aux_info = "KILLED"
+        if not self._completed.wait(timeout):
+            process.kill()
+            if not self._completed.wait(timeout):
+                raise TimeoutError("could not collect terminated process")
+
 
 if __name__ == "__main__":
-    pw = ProcessWrap(shlex.split("bash -c 'sleep 2; echo hello'"), os.getcwd())
-    print(pw.get_status())
-    pw.run_task()
-    print(pw.get_status())
-    time.sleep(1)
-    print(pw.get_status())
-    pw.kill_task()
-    print(pw.get_status())
+    wrapper = ProcessWrap(shlex.split("python -c \"print('hello')\""), str(Path.cwd()))
+    print(wrapper.get_status())
+    wrapper.run_task()
+    print(wrapper.wait(timeout=10))
