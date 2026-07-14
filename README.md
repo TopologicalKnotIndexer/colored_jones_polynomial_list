@@ -65,7 +65,7 @@ If you use this repository in academic work, please cite it as:
 
 ```bibtex
 @software{topologicalknotindexer_colored_jones_polynomial_list,
-  author = {{TopologicalKnotIndexer contributors}},
+  author = {{GGN\_2015}},
   title = {{colored\_jones\_polynomial\_list}},
   year = {2026},
   url = {https://github.com/TopologicalKnotIndexer/colored_jones_polynomial_list}
