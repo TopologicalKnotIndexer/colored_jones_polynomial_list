@@ -58,3 +58,16 @@ python -m unittest discover -s tests -v
 ```
 
 The computed dataset is released under the repository's MIT license.
+
+## Citation
+
+If you use this repository in academic work, please cite it as:
+
+```bibtex
+@software{topologicalknotindexer_colored_jones_polynomial_list,
+  author = {{TopologicalKnotIndexer contributors}},
+  title = {{colored\_jones\_polynomial\_list}},
+  year = {2026},
+  url = {https://github.com/TopologicalKnotIndexer/colored_jones_polynomial_list}
+}
+```
